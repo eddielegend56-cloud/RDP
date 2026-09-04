@@ -1,113 +1,284 @@
-name: RDP
+name: RDP Files + Tailscale
 
 on:
   workflow_dispatch:
 
+permissions:
+  actions: read
+  contents: read
+
 jobs:
-  secure-rdp:
+  setup:
     runs-on: windows-latest
-    timeout-minutes: 3600
 
     steps:
-      - name: Configure Core RDP Settings
+
+      # =========================================================
+      # 1. Prepare RDP user's folders
+      # =========================================================
+      - name: Prepare RDP folders
+        shell: powershell
         run: |
-          # Enable Remote Desktop and disable Network Level Authentication (if needed)
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-                             -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "SecurityLayer" -Value 0 -Force
+          $folders = @(
+            "C:\Users\RDP\Desktop",
+            "C:\Users\RDP\Documents",
+            "C:\Users\RDP\Downloads",
+            "C:\Users\RDP\Pictures",
+            "C:\Users\RDP\Videos",
+            "C:\Users\RDP\Music"
+          )
 
-          # Remove any existing rule with the same name to avoid duplication
-          netsh advfirewall firewall delete rule name="RDP-Tailscale"
-          
-          # For testing, allow any incoming connection on port 3389
-          netsh advfirewall firewall add rule name="RDP-Tailscale" `
-            dir=in action=allow protocol=TCP localport=3389
-
-          # (Optional) Restart the Remote Desktop service to ensure changes take effect
-          Restart-Service -Name TermService -Force
-
-      - name: Create RDP User with Secure Password
-        run: |
-          Add-Type -AssemblyName System.Security
-          $charSet = @{
-              Upper   = [char[]](65..90)      # A-Z
-              Lower   = [char[]](97..122)     # a-z
-              Number  = [char[]](48..57)      # 0-9
-              Special = ([char[]](33..47) + [char[]](58..64) +
-                         [char[]](91..96) + [char[]](123..126)) # Special characters
-          }
-          $rawPassword = @()
-          $rawPassword += $charSet.Upper | Get-Random -Count 4
-          $rawPassword += $charSet.Lower | Get-Random -Count 4
-          $rawPassword += $charSet.Number | Get-Random -Count 4
-          $rawPassword += $charSet.Special | Get-Random -Count 4
-          $password = -join ($rawPassword | Sort-Object { Get-Random })
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-          New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
-          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
-          
-          echo "RDP_CREDS=User: RDP | Password: $password" >> $env:GITHUB_ENV
-          
-          if (-not (Get-LocalUser -Name "RDP")) {
-              Write-Error "User creation failed"
-              exit 1
+          foreach ($folder in $folders) {
+            New-Item -ItemType Directory -Path $folder -Force | Out-Null
           }
 
+          Write-Host "Folders ready."
+
+      # =========================================================
+      # 2. Find the newest RDP-backup artifact using GitHub API
+      # =========================================================
+      - name: Find previous backup
+        id: find_backup
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            Accept = "application/vnd.github+json"
+            "X-GitHub-Api-Version" = "2022-11-28"
+          }
+
+          $owner = "${{ github.repository_owner }}"
+          $repo  = "${{ github.event.repository.name }}"
+
+          $url = "https://api.github.com/repos/$owner/$repo/actions/artifacts?name=RDP-backup&per_page=100"
+
+          $response = Invoke-RestMethod `
+            -Uri $url `
+            -Headers $headers `
+            -Method Get
+
+          $artifact = $response.artifacts |
+            Where-Object {
+              $_.name -eq "RDP-backup" -and
+              $_.expired -eq $false
+            } |
+            Sort-Object created_at -Descending |
+            Select-Object -First 1
+
+          if ($null -eq $artifact) {
+            Write-Host "No previous backup found."
+            "FOUND=false" >> $env:GITHUB_OUTPUT
+          }
+          else {
+            Write-Host "Previous backup found."
+            Write-Host "Artifact ID: $($artifact.id)"
+            Write-Host "Created: $($artifact.created_at)"
+
+            "FOUND=true" >> $env:GITHUB_OUTPUT
+            "ARTIFACT_ID=$($artifact.id)" >> $env:GITHUB_OUTPUT
+          }
+
+      # =========================================================
+      # 3. Download previous artifact through GitHub API
+      # =========================================================
+      - name: Download previous backup
+        if: steps.find_backup.outputs.FOUND == 'true'
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $artifactId = "${{ steps.find_backup.outputs.ARTIFACT_ID }}"
+          $output = "$env:TEMP\RDP-backup.zip"
+
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            Accept = "application/vnd.github+json"
+            "X-GitHub-Api-Version" = "2022-11-28"
+          }
+
+          $owner = "${{ github.repository_owner }}"
+          $repo  = "${{ github.event.repository.name }}"
+
+          $url = "https://api.github.com/repos/$owner/$repo/actions/artifacts/$artifactId/zip"
+
+          Invoke-WebRequest `
+            -Uri $url `
+            -Headers $headers `
+            -OutFile $output
+
+          if (-not (Test-Path $output)) {
+            Write-Error "Backup download failed."
+            exit 1
+          }
+
+          Write-Host "Backup downloaded."
+
+      # =========================================================
+      # 4. Restore previous files
+      # =========================================================
+      - name: Restore previous files
+        if: steps.find_backup.outputs.FOUND == 'true'
+        shell: powershell
+        run: |
+          $zip = "$env:TEMP\RDP-backup.zip"
+          $destination = "C:\Users\RDP"
+
+          Write-Host "Restoring files..."
+
+          Expand-Archive `
+            -Path $zip `
+            -DestinationPath $destination `
+            -Force
+
+          Write-Host "Files restored."
+
+      # =========================================================
+      # 5. Install Tailscale
+      # =========================================================
       - name: Install Tailscale
+        shell: powershell
         run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $installerPath = "$env:TEMP\tailscale.msi"
-          
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-          Remove-Item $installerPath -Force
+          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installer = "$env:TEMP\tailscale.msi"
 
-      - name: Establish Tailscale Connection
-        run: |
-          # Bring up Tailscale with the provided auth key and set a unique hostname
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
-          
-          # Wait for Tailscale to assign an IP
-          $tsIP = $null
-          $retries = 0
-          while (-not $tsIP -and $retries -lt 10) {
-              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-              Start-Sleep -Seconds 5
-              $retries++
-          }
-          
-          if (-not $tsIP) {
-              Write-Error "Tailscale IP not assigned. Exiting."
-              exit 1
-          }
-          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-      
-      - name: Verify RDP Accessibility
-        run: |
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          
-          # Test connectivity using Test-NetConnection against the Tailscale IP on port 3389
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $testResult.TcpTestSucceeded) {
-              Write-Error "TCP connection to RDP port 3389 failed"
-              exit 1
-          }
-          Write-Host "TCP connectivity successful!"
+          Invoke-WebRequest `
+            -Uri $url `
+            -OutFile $installer
 
-      - name: Maintain Connection
+          Start-Process msiexec.exe `
+            -ArgumentList "/i", "`"$installer`"", "/quiet", "/norestart" `
+            -Wait
+
+          Remove-Item $installer -Force
+
+          Write-Host "Tailscale installed."
+
+      # =========================================================
+      # 6. Connect to your Tailscale network
+      # =========================================================
+      - name: Connect to Tailscale
+        shell: powershell
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
-          Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address: $env:TAILSCALE_IP"
-          Write-Host "Username: RDP"
-          Write-Host "Password: $(echo $env:RDP_CREDS)"
-          Write-Host "==================`n"
-          
-          # Keep runner active indefinitely (or until manually cancelled)
-          while ($true) {
-              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
-              Start-Sleep -Seconds 300
+          $tailscale = "$env:ProgramFiles\Tailscale\tailscale.exe"
+
+          if (-not (Test-Path $tailscale)) {
+            Write-Error "Tailscale executable was not found."
+            exit 1
           }
+
+          & $tailscale up `
+            --authkey="$env:TAILSCALE_AUTH_KEY" `
+            --hostname="github-runner-$env:GITHUB_RUN_ID"
+
+          Start-Sleep -Seconds 5
+
+          Write-Host ""
+          Write-Host "========== TAILSCALE =========="
+          & $tailscale status
+
+          Write-Host ""
+          Write-Host "Tailscale IPv4:"
+          & $tailscale ip -4
+
+          Write-Host "==============================="
+
+      # =========================================================
+      # 7. Show restored files
+      # =========================================================
+      - name: Verify files
+        shell: powershell
+        run: |
+          Write-Host ""
+          Write-Host "========== RESTORED FILES =========="
+
+          Get-ChildItem `
+            -Path "C:\Users\RDP" `
+            -Recurse `
+            -Force `
+            -ErrorAction SilentlyContinue |
+            Select-Object FullName, Length, LastWriteTime |
+            Format-Table -AutoSize
+
+          Write-Host "===================================="
+
+      # =========================================================
+      # 8. Your work goes here
+      # =========================================================
+      - name: Working environment
+        shell: powershell
+        run: |
+          Write-Host "Your restored files are located at:"
+          Write-Host "C:\Users\RDP"
+
+          Write-Host ""
+          Write-Host "Tailscale is connected."
+
+          # Put your legitimate commands/tasks here.
+
+      # =========================================================
+      # 9. Create a new backup
+      # =========================================================
+      - name: Create RDP backup
+        if: always()
+        shell: powershell
+        run: |
+          $source = "C:\Users\RDP"
+          $backupDir = "$env:GITHUB_WORKSPACE\backup"
+          $backupZip = "$backupDir\RDP-backup.zip"
+
+          New-Item `
+            -ItemType Directory `
+            -Path $backupDir `
+            -Force | Out-Null
+
+          if (Test-Path $backupZip) {
+            Remove-Item $backupZip -Force
+          }
+
+          $paths = @(
+            "$source\Desktop\*",
+            "$source\Documents\*",
+            "$source\Downloads\*",
+            "$source\Pictures\*",
+            "$source\Videos\*",
+            "$source\Music\*"
+          )
+
+          $existing = @()
+
+          foreach ($path in $paths) {
+            $parent = Split-Path $path -Parent
+
+            if (Test-Path $parent) {
+              $existing += $path
+            }
+          }
+
+          if ($existing.Count -gt 0) {
+            Compress-Archive `
+              -Path $existing `
+              -DestinationPath $backupZip `
+              -CompressionLevel Optimal `
+              -Force
+
+            Write-Host "Backup created successfully."
+          }
+          else {
+            Write-Host "Nothing to back up."
+          }
+
+      # =========================================================
+      # 10. Upload backup to GitHub Actions artifact storage
+      # =========================================================
+      - name: Upload RDP backup
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: RDP-backup
+          path: backup/RDP-backup.zip
+          if-no-files-found: warn
+          retention-days: 90
