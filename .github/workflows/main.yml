@@ -47,7 +47,7 @@ jobs:
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
-          netsh advfirewall firewall delete rule name="RDP-Tailscale"
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
           Restart-Service -Name TermService -Force
 
@@ -138,7 +138,7 @@ jobs:
             foreach ($path in $savePaths) {
               if (Test-Path $path.Source) {
                 New-Item -ItemType Directory -Path $path.Dest -Force | Out-Null
-                Copy-Item -Path "$($path.Source)\*" -Destination $path.Dest -Recurse -Force -ErrorAction SilentlyContinue
+                Get-ChildItem -Path $path.Source -File -Recurse -ErrorAction SilentlyContinue | Copy-Item -Destination $path.Dest -Force -ErrorAction SilentlyContinue
               }
             }
             $infoContent = "RDP Connection Info`n==================`nTailscale IP: $env:TAILSCALE_IP`nUsername: RDP`nPassword: $env:RDP_PASSWORD`nLast Updated: $(Get-Date)"
@@ -168,15 +168,15 @@ jobs:
           Write-Host "Performing final save..."
           if (Test-Path "$env:USERPROFILE\Desktop") {
             New-Item -ItemType Directory -Path "session-state/Desktop" -Force | Out-Null
-            Copy-Item -Path "$env:USERPROFILE\Desktop\*" -Destination "session-state/Desktop" -Recurse -Force -ErrorAction SilentlyContinue
+            Get-ChildItem -Path "$env:USERPROFILE\Desktop" -File -Recurse -ErrorAction SilentlyContinue | Copy-Item -Destination "session-state/Desktop" -Force -ErrorAction SilentlyContinue
           }
           if (Test-Path "$env:USERPROFILE\Documents") {
             New-Item -ItemType Directory -Path "session-state/Documents" -Force | Out-Null
-            Copy-Item -Path "$env:USERPROFILE\Documents\*" -Destination "session-state/Documents" -Recurse -Force -ErrorAction SilentlyContinue
+            Get-ChildItem -Path "$env:USERPROFILE\Documents" -File -Recurse -ErrorAction SilentlyContinue | Copy-Item -Destination "session-state/Documents" -Force -ErrorAction SilentlyContinue
           }
           if (Test-Path "$env:USERPROFILE\Downloads") {
             New-Item -ItemType Directory -Path "session-state/Downloads" -Force | Out-Null
-            Copy-Item -Path "$env:USERPROFILE\Downloads\*" -Destination "session-state/Downloads" -Recurse -Force -ErrorAction SilentlyContinue
+            Get-ChildItem -Path "$env:USERPROFILE\Downloads" -File -Recurse -ErrorAction SilentlyContinue | Copy-Item -Destination "session-state/Downloads" -Force -ErrorAction SilentlyContinue
           }
           git config --global user.email "action@github.com"
           git config --global user.name "GitHub Action"
