@@ -23,25 +23,20 @@ jobs:
         run: |
           if (Test-Path "session-state") {
             Write-Host "Restoring previous session state..."
-            
             $restorePaths = @(
               @{Source="session-state/Desktop"; Dest="$env:USERPROFILE\Desktop"},
               @{Source="session-state/Documents"; Dest="$env:USERPROFILE\Documents"},
-              @{Source="session-state/Downloads"; Dest="$env:USERPROFILE\Downloads"},
-              @{Source="session-state/AppData-Roaming"; Dest="$env:APPDATA"},
-              @{Source="session-state/AppData-Local"; Dest="$env:LOCALAPPDATA"}
+              @{Source="session-state/Downloads"; Dest="$env:USERPROFILE\Downloads"}
             )
-            
             foreach ($path in $restorePaths) {
               if (Test-Path $path.Source) {
                 if (-not (Test-Path $path.Dest)) {
-                  New-Item -ItemType Directory -Path $path.Dest -Force
+                  New-Item -ItemType Directory -Path $path.Dest -Force | Out-Null
                 }
-                Copy-Item -Path "$($path.Source)\*" -Destination $path.Dest -Recurse -Force
+                Copy-Item -Path "$($path.Source)\*" -Destination $path.Dest -Recurse -Force -ErrorAction SilentlyContinue
                 Write-Host "Restored: $($path.Source)"
               }
             }
-            
             Write-Host "Session state restored successfully!"
           } else {
             Write-Host "No previous session state found. Starting fresh."
@@ -49,24 +44,16 @@ jobs:
 
       - name: Configure Core RDP Settings
         run: |
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-                             -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "SecurityLayer" -Value 0 -Force
-
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
           netsh advfirewall firewall delete rule name="RDP-Tailscale"
-          
-          netsh advfirewall firewall add rule name="RDP-Tailscale" `
-            dir=in action=allow protocol=TCP localport=3389
-
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
           Restart-Service -Name TermService -Force
 
-      - name: Create RDP User with Secure Password
+      - name: Create RDP User
         run: |
           $userExists = Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue
-          
           if ($userExists) {
             Write-Host "RDP user already exists"
             $password = "RDP@123456"
@@ -76,8 +63,7 @@ jobs:
                 Upper   = [char[]](65..90)
                 Lower   = [char[]](97..122)
                 Number  = [char[]](48..57)
-                Special = ([char[]](33..47) + [char[]](58..64) +
-                           [char[]](91..96) + [char[]](123..126))
+                Special = ([char[]](33..47) + [char[]](58..64) + [char[]](91..96) + [char[]](123..126))
             }
             $rawPassword = @()
             $rawPassword += $charSet.Upper | Get-Random -Count 4
@@ -90,13 +76,7 @@ jobs:
             Add-LocalGroupMember -Group "Administrators" -Member "RDP"
             Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
           }
-          
           echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
-          
-          if (-not (Get-LocalUser -Name "RDP")) {
-              Write-Error "User creation failed"
-              exit 1
-          }
 
       - name: Install Tailscale
         run: |
@@ -105,7 +85,6 @@ jobs:
           } else {
             $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
             $installerPath = "$env:TEMP\tailscale.msi"
-            
             Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
             Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
             Remove-Item $installerPath -Force
@@ -114,7 +93,6 @@ jobs:
       - name: Establish Tailscale Connection
         run: |
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-persistent
-          
           $tsIP = $null
           $retries = 0
           while (-not $tsIP -and $retries -lt 15) {
@@ -122,26 +100,17 @@ jobs:
               Start-Sleep -Seconds 5
               $retries++
           }
-          
           if (-not $tsIP) {
               Write-Error "Tailscale IP not assigned. Exiting."
               exit 1
           }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-          
-          @"
-          RDP Connection Info
-          ==================
-          Tailscale IP: $tsIP
-          Username: RDP
-          Password: $env:RDP_PASSWORD
-          Last Updated: $(Get-Date)
-          "@ | Out-File -FilePath "rdp-info.txt" -Encoding UTF8
+          $infoContent = "RDP Connection Info`n==================`nTailscale IP: $tsIP`nUsername: RDP`nPassword: $env:RDP_PASSWORD`nLast Updated: $(Get-Date)"
+          Set-Content -Path "rdp-info.txt" -Value $infoContent -Encoding UTF8
 
       - name: Verify RDP Accessibility
         run: |
           Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          
           $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
           if (-not $testResult.TcpTestSucceeded) {
               Write-Error "TCP connection to RDP port 3389 failed"
@@ -151,88 +120,67 @@ jobs:
 
       - name: Maintain Connection with Auto-Save
         run: |
-          Write-Host "`n=== RDP ACCESS ==="
+          Write-Host "=== RDP ACCESS ==="
           Write-Host "Address: $env:TAILSCALE_IP"
           Write-Host "Username: RDP"
           Write-Host "Password: $env:RDP_PASSWORD"
-          Write-Host "==================`n"
+          Write-Host "=================="
           
           New-Item -ItemType Directory -Path "session-state" -Force | Out-Null
           
           function Save-SessionState {
             Write-Host "[$(Get-Date)] Saving session state..."
-            
             $savePaths = @(
               @{Source="$env:USERPROFILE\Desktop"; Dest="session-state/Desktop"},
               @{Source="$env:USERPROFILE\Documents"; Dest="session-state/Documents"},
-              @{Source="$env:USERPROFILE\Downloads"; Dest="session-state/Downloads"},
-              @{Source="$env:APPDATA"; Dest="session-state/AppData-Roaming"},
-              @{Source="$env:LOCALAPPDATA"; Dest="session-state/AppData-Local"}
+              @{Source="$env:USERPROFILE\Downloads"; Dest="session-state/Downloads"}
             )
-            
             foreach ($path in $savePaths) {
               if (Test-Path $path.Source) {
                 New-Item -ItemType Directory -Path $path.Dest -Force | Out-Null
-                Copy-Item -Path "$($path.Source)\*" -Destination $path.Dest -Recurse -Force
-                Write-Host "Saved: $($path.Source)"
+                Copy-Item -Path "$($path.Source)\*" -Destination $path.Dest -Recurse -Force -ErrorAction SilentlyContinue
               }
             }
-            
-            @"
-            RDP Connection Info
-            ==================
-            Tailscale IP: $env:TAILSCALE_IP
-            Username: RDP
-            Password: $env:RDP_PASSWORD
-            Last Updated: $(Get-Date)
-            "@ | Out-File -FilePath "rdp-info.txt" -Encoding UTF8
-            
+            $infoContent = "RDP Connection Info`n==================`nTailscale IP: $env:TAILSCALE_IP`nUsername: RDP`nPassword: $env:RDP_PASSWORD`nLast Updated: $(Get-Date)"
+            Set-Content -Path "rdp-info.txt" -Value $infoContent -Encoding UTF8
             git config --global user.email "action@github.com"
             git config --global user.name "GitHub Action"
             git add session-state/ rdp-info.txt
-            git commit -m "Auto-save session state at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+            git commit -m "Auto-save at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
             git push
-            
-            Write-Host "Session state saved successfully!"
+            Write-Host "Session state saved!"
           }
           
           $saveCounter = 0
           while ($true) {
-              Write-Host "[$(Get-Date)] RDP Active - Session running"
-              
+              Write-Host "[$(Get-Date)] RDP Active"
               $saveCounter++
               if ($saveCounter -ge 2) {
                   Save-SessionState
                   $saveCounter = 0
               }
-              
               Start-Sleep -Seconds 300
           }
 
       - name: Final Save Before Timeout
         if: always()
         run: |
-          Write-Host "Performing final save before timeout..."
-          
+          Write-Host "Performing final save..."
           if (Test-Path "$env:USERPROFILE\Desktop") {
             New-Item -ItemType Directory -Path "session-state/Desktop" -Force | Out-Null
-            Copy-Item -Path "$env:USERPROFILE\Desktop\*" -Destination "session-state/Desktop" -Recurse -Force
+            Copy-Item -Path "$env:USERPROFILE\Desktop\*" -Destination "session-state/Desktop" -Recurse -Force -ErrorAction SilentlyContinue
           }
-          
           if (Test-Path "$env:USERPROFILE\Documents") {
             New-Item -ItemType Directory -Path "session-state/Documents" -Force | Out-Null
-            Copy-Item -Path "$env:USERPROFILE\Documents\*" -Destination "session-state/Documents" -Recurse -Force
+            Copy-Item -Path "$env:USERPROFILE\Documents\*" -Destination "session-state/Documents" -Recurse -Force -ErrorAction SilentlyContinue
           }
-          
           if (Test-Path "$env:USERPROFILE\Downloads") {
             New-Item -ItemType Directory -Path "session-state/Downloads" -Force | Out-Null
-            Copy-Item -Path "$env:USERPROFILE\Downloads\*" -Destination "session-state/Downloads" -Recurse -Force
+            Copy-Item -Path "$env:USERPROFILE\Downloads\*" -Destination "session-state/Downloads" -Recurse -Force -ErrorAction SilentlyContinue
           }
-          
           git config --global user.email "action@github.com"
           git config --global user.name "GitHub Action"
           git add session-state/ rdp-info.txt
-          git commit -m "Final save before timeout at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+          git commit -m "Final save at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
           git push
-          
           Write-Host "Final save completed!"
