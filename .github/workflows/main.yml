@@ -1,284 +1,238 @@
-name: RDP Files + Tailscale
+name: Persistent RDP with Tailscale
 
 on:
   workflow_dispatch:
-
-permissions:
-  actions: read
-  contents: read
+  schedule:
+    - cron: '0 */5 * * *'
+  push:
+    branches: [ main ]
+    paths:
+      - 'session-state/**'
+      - 'rdp-info.txt'
 
 jobs:
-  setup:
+  persistent-rdp:
     runs-on: windows-latest
+    timeout-minutes: 350
 
     steps:
-
-      # =========================================================
-      # 1. Prepare RDP user's folders
-      # =========================================================
-      - name: Prepare RDP folders
-        shell: powershell
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        
+      - name: Restore Previous Session State
         run: |
-          $folders = @(
-            "C:\Users\RDP\Desktop",
-            "C:\Users\RDP\Documents",
-            "C:\Users\RDP\Downloads",
-            "C:\Users\RDP\Pictures",
-            "C:\Users\RDP\Videos",
-            "C:\Users\RDP\Music"
-          )
-
-          foreach ($folder in $folders) {
-            New-Item -ItemType Directory -Path $folder -Force | Out-Null
-          }
-
-          Write-Host "Folders ready."
-
-      # =========================================================
-      # 2. Find the newest RDP-backup artifact using GitHub API
-      # =========================================================
-      - name: Find previous backup
-        id: find_backup
-        shell: powershell
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $headers = @{
-            Authorization = "Bearer $env:GH_TOKEN"
-            Accept = "application/vnd.github+json"
-            "X-GitHub-Api-Version" = "2022-11-28"
-          }
-
-          $owner = "${{ github.repository_owner }}"
-          $repo  = "${{ github.event.repository.name }}"
-
-          $url = "https://api.github.com/repos/$owner/$repo/actions/artifacts?name=RDP-backup&per_page=100"
-
-          $response = Invoke-RestMethod `
-            -Uri $url `
-            -Headers $headers `
-            -Method Get
-
-          $artifact = $response.artifacts |
-            Where-Object {
-              $_.name -eq "RDP-backup" -and
-              $_.expired -eq $false
-            } |
-            Sort-Object created_at -Descending |
-            Select-Object -First 1
-
-          if ($null -eq $artifact) {
-            Write-Host "No previous backup found."
-            "FOUND=false" >> $env:GITHUB_OUTPUT
-          }
-          else {
-            Write-Host "Previous backup found."
-            Write-Host "Artifact ID: $($artifact.id)"
-            Write-Host "Created: $($artifact.created_at)"
-
-            "FOUND=true" >> $env:GITHUB_OUTPUT
-            "ARTIFACT_ID=$($artifact.id)" >> $env:GITHUB_OUTPUT
-          }
-
-      # =========================================================
-      # 3. Download previous artifact through GitHub API
-      # =========================================================
-      - name: Download previous backup
-        if: steps.find_backup.outputs.FOUND == 'true'
-        shell: powershell
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $artifactId = "${{ steps.find_backup.outputs.ARTIFACT_ID }}"
-          $output = "$env:TEMP\RDP-backup.zip"
-
-          $headers = @{
-            Authorization = "Bearer $env:GH_TOKEN"
-            Accept = "application/vnd.github+json"
-            "X-GitHub-Api-Version" = "2022-11-28"
-          }
-
-          $owner = "${{ github.repository_owner }}"
-          $repo  = "${{ github.event.repository.name }}"
-
-          $url = "https://api.github.com/repos/$owner/$repo/actions/artifacts/$artifactId/zip"
-
-          Invoke-WebRequest `
-            -Uri $url `
-            -Headers $headers `
-            -OutFile $output
-
-          if (-not (Test-Path $output)) {
-            Write-Error "Backup download failed."
-            exit 1
-          }
-
-          Write-Host "Backup downloaded."
-
-      # =========================================================
-      # 4. Restore previous files
-      # =========================================================
-      - name: Restore previous files
-        if: steps.find_backup.outputs.FOUND == 'true'
-        shell: powershell
-        run: |
-          $zip = "$env:TEMP\RDP-backup.zip"
-          $destination = "C:\Users\RDP"
-
-          Write-Host "Restoring files..."
-
-          Expand-Archive `
-            -Path $zip `
-            -DestinationPath $destination `
-            -Force
-
-          Write-Host "Files restored."
-
-      # =========================================================
-      # 5. Install Tailscale
-      # =========================================================
-      - name: Install Tailscale
-        shell: powershell
-        run: |
-          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $installer = "$env:TEMP\tailscale.msi"
-
-          Invoke-WebRequest `
-            -Uri $url `
-            -OutFile $installer
-
-          Start-Process msiexec.exe `
-            -ArgumentList "/i", "`"$installer`"", "/quiet", "/norestart" `
-            -Wait
-
-          Remove-Item $installer -Force
-
-          Write-Host "Tailscale installed."
-
-      # =========================================================
-      # 6. Connect to your Tailscale network
-      # =========================================================
-      - name: Connect to Tailscale
-        shell: powershell
-        env:
-          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
-        run: |
-          $tailscale = "$env:ProgramFiles\Tailscale\tailscale.exe"
-
-          if (-not (Test-Path $tailscale)) {
-            Write-Error "Tailscale executable was not found."
-            exit 1
-          }
-
-          & $tailscale up `
-            --authkey="$env:TAILSCALE_AUTH_KEY" `
-            --hostname="github-runner-$env:GITHUB_RUN_ID"
-
-          Start-Sleep -Seconds 5
-
-          Write-Host ""
-          Write-Host "========== TAILSCALE =========="
-          & $tailscale status
-
-          Write-Host ""
-          Write-Host "Tailscale IPv4:"
-          & $tailscale ip -4
-
-          Write-Host "==============================="
-
-      # =========================================================
-      # 7. Show restored files
-      # =========================================================
-      - name: Verify files
-        shell: powershell
-        run: |
-          Write-Host ""
-          Write-Host "========== RESTORED FILES =========="
-
-          Get-ChildItem `
-            -Path "C:\Users\RDP" `
-            -Recurse `
-            -Force `
-            -ErrorAction SilentlyContinue |
-            Select-Object FullName, Length, LastWriteTime |
-            Format-Table -AutoSize
-
-          Write-Host "===================================="
-
-      # =========================================================
-      # 8. Your work goes here
-      # =========================================================
-      - name: Working environment
-        shell: powershell
-        run: |
-          Write-Host "Your restored files are located at:"
-          Write-Host "C:\Users\RDP"
-
-          Write-Host ""
-          Write-Host "Tailscale is connected."
-
-          # Put your legitimate commands/tasks here.
-
-      # =========================================================
-      # 9. Create a new backup
-      # =========================================================
-      - name: Create RDP backup
-        if: always()
-        shell: powershell
-        run: |
-          $source = "C:\Users\RDP"
-          $backupDir = "$env:GITHUB_WORKSPACE\backup"
-          $backupZip = "$backupDir\RDP-backup.zip"
-
-          New-Item `
-            -ItemType Directory `
-            -Path $backupDir `
-            -Force | Out-Null
-
-          if (Test-Path $backupZip) {
-            Remove-Item $backupZip -Force
-          }
-
-          $paths = @(
-            "$source\Desktop\*",
-            "$source\Documents\*",
-            "$source\Downloads\*",
-            "$source\Pictures\*",
-            "$source\Videos\*",
-            "$source\Music\*"
-          )
-
-          $existing = @()
-
-          foreach ($path in $paths) {
-            $parent = Split-Path $path -Parent
-
-            if (Test-Path $parent) {
-              $existing += $path
+          if (Test-Path "session-state") {
+            Write-Host "Restoring previous session state..."
+            
+            $restorePaths = @(
+              @{Source="session-state/Desktop"; Dest="$env:USERPROFILE\Desktop"},
+              @{Source="session-state/Documents"; Dest="$env:USERPROFILE\Documents"},
+              @{Source="session-state/Downloads"; Dest="$env:USERPROFILE\Downloads"},
+              @{Source="session-state/AppData-Roaming"; Dest="$env:APPDATA"},
+              @{Source="session-state/AppData-Local"; Dest="$env:LOCALAPPDATA"}
+            )
+            
+            foreach ($path in $restorePaths) {
+              if (Test-Path $path.Source) {
+                if (-not (Test-Path $path.Dest)) {
+                  New-Item -ItemType Directory -Path $path.Dest -Force
+                }
+                Copy-Item -Path "$($path.Source)\*" -Destination $path.Dest -Recurse -Force
+                Write-Host "Restored: $($path.Source)"
+              }
             }
+            
+            Write-Host "Session state restored successfully!"
+          } else {
+            Write-Host "No previous session state found. Starting fresh."
           }
 
-          if ($existing.Count -gt 0) {
-            Compress-Archive `
-              -Path $existing `
-              -DestinationPath $backupZip `
-              -CompressionLevel Optimal `
-              -Force
+      - name: Configure Core RDP Settings
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+                             -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "SecurityLayer" -Value 0 -Force
 
-            Write-Host "Backup created successfully."
+          netsh advfirewall firewall delete rule name="RDP-Tailscale"
+          
+          netsh advfirewall firewall add rule name="RDP-Tailscale" `
+            dir=in action=allow protocol=TCP localport=3389
+
+          Restart-Service -Name TermService -Force
+
+      - name: Create RDP User with Secure Password
+        run: |
+          $userExists = Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue
+          
+          if ($userExists) {
+            Write-Host "RDP user already exists"
+            $password = "RDP@123456"
+          } else {
+            Add-Type -AssemblyName System.Security
+            $charSet = @{
+                Upper   = [char[]](65..90)
+                Lower   = [char[]](97..122)
+                Number  = [char[]](48..57)
+                Special = ([char[]](33..47) + [char[]](58..64) +
+                           [char[]](91..96) + [char[]](123..126))
+            }
+            $rawPassword = @()
+            $rawPassword += $charSet.Upper | Get-Random -Count 4
+            $rawPassword += $charSet.Lower | Get-Random -Count 4
+            $rawPassword += $charSet.Number | Get-Random -Count 4
+            $rawPassword += $charSet.Special | Get-Random -Count 4
+            $password = -join ($rawPassword | Sort-Object { Get-Random })
+            $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+            New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
+            Add-LocalGroupMember -Group "Administrators" -Member "RDP"
+            Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
           }
-          else {
-            Write-Host "Nothing to back up."
+          
+          echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
+          
+          if (-not (Get-LocalUser -Name "RDP")) {
+              Write-Error "User creation failed"
+              exit 1
           }
 
-      # =========================================================
-      # 10. Upload backup to GitHub Actions artifact storage
-      # =========================================================
-      - name: Upload RDP backup
+      - name: Install Tailscale
+        run: |
+          if (Test-Path "$env:ProgramFiles\Tailscale\tailscale.exe") {
+            Write-Host "Tailscale already installed"
+          } else {
+            $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+            $installerPath = "$env:TEMP\tailscale.msi"
+            
+            Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+            Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+            Remove-Item $installerPath -Force
+          }
+
+      - name: Establish Tailscale Connection
+        run: |
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-persistent
+          
+          $tsIP = $null
+          $retries = 0
+          while (-not $tsIP -and $retries -lt 15) {
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              Start-Sleep -Seconds 5
+              $retries++
+          }
+          
+          if (-not $tsIP) {
+              Write-Error "Tailscale IP not assigned. Exiting."
+              exit 1
+          }
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+          
+          @"
+          RDP Connection Info
+          ==================
+          Tailscale IP: $tsIP
+          Username: RDP
+          Password: $env:RDP_PASSWORD
+          Last Updated: $(Get-Date)
+          "@ | Out-File -FilePath "rdp-info.txt" -Encoding UTF8
+
+      - name: Verify RDP Accessibility
+        run: |
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          
+          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $testResult.TcpTestSucceeded) {
+              Write-Error "TCP connection to RDP port 3389 failed"
+              exit 1
+          }
+          Write-Host "TCP connectivity successful!"
+
+      - name: Maintain Connection with Auto-Save
+        run: |
+          Write-Host "`n=== RDP ACCESS ==="
+          Write-Host "Address: $env:TAILSCALE_IP"
+          Write-Host "Username: RDP"
+          Write-Host "Password: $env:RDP_PASSWORD"
+          Write-Host "==================`n"
+          
+          New-Item -ItemType Directory -Path "session-state" -Force | Out-Null
+          
+          function Save-SessionState {
+            Write-Host "[$(Get-Date)] Saving session state..."
+            
+            $savePaths = @(
+              @{Source="$env:USERPROFILE\Desktop"; Dest="session-state/Desktop"},
+              @{Source="$env:USERPROFILE\Documents"; Dest="session-state/Documents"},
+              @{Source="$env:USERPROFILE\Downloads"; Dest="session-state/Downloads"},
+              @{Source="$env:APPDATA"; Dest="session-state/AppData-Roaming"},
+              @{Source="$env:LOCALAPPDATA"; Dest="session-state/AppData-Local"}
+            )
+            
+            foreach ($path in $savePaths) {
+              if (Test-Path $path.Source) {
+                New-Item -ItemType Directory -Path $path.Dest -Force | Out-Null
+                Copy-Item -Path "$($path.Source)\*" -Destination $path.Dest -Recurse -Force
+                Write-Host "Saved: $($path.Source)"
+              }
+            }
+            
+            @"
+            RDP Connection Info
+            ==================
+            Tailscale IP: $env:TAILSCALE_IP
+            Username: RDP
+            Password: $env:RDP_PASSWORD
+            Last Updated: $(Get-Date)
+            "@ | Out-File -FilePath "rdp-info.txt" -Encoding UTF8
+            
+            git config --global user.email "action@github.com"
+            git config --global user.name "GitHub Action"
+            git add session-state/ rdp-info.txt
+            git commit -m "Auto-save session state at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+            git push
+            
+            Write-Host "Session state saved successfully!"
+          }
+          
+          $saveCounter = 0
+          while ($true) {
+              Write-Host "[$(Get-Date)] RDP Active - Session running"
+              
+              $saveCounter++
+              if ($saveCounter -ge 2) {
+                  Save-SessionState
+                  $saveCounter = 0
+              }
+              
+              Start-Sleep -Seconds 300
+          }
+
+      - name: Final Save Before Timeout
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: RDP-backup
-          path: backup/RDP-backup.zip
-          if-no-files-found: warn
-          retention-days: 90
+        run: |
+          Write-Host "Performing final save before timeout..."
+          
+          if (Test-Path "$env:USERPROFILE\Desktop") {
+            New-Item -ItemType Directory -Path "session-state/Desktop" -Force | Out-Null
+            Copy-Item -Path "$env:USERPROFILE\Desktop\*" -Destination "session-state/Desktop" -Recurse -Force
+          }
+          
+          if (Test-Path "$env:USERPROFILE\Documents") {
+            New-Item -ItemType Directory -Path "session-state/Documents" -Force | Out-Null
+            Copy-Item -Path "$env:USERPROFILE\Documents\*" -Destination "session-state/Documents" -Recurse -Force
+          }
+          
+          if (Test-Path "$env:USERPROFILE\Downloads") {
+            New-Item -ItemType Directory -Path "session-state/Downloads" -Force | Out-Null
+            Copy-Item -Path "$env:USERPROFILE\Downloads\*" -Destination "session-state/Downloads" -Recurse -Force
+          }
+          
+          git config --global user.email "action@github.com"
+          git config --global user.name "GitHub Action"
+          git add session-state/ rdp-info.txt
+          git commit -m "Final save before timeout at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+          git push
+          
+          Write-Host "Final save completed!"
