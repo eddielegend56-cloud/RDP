@@ -143,11 +143,13 @@ jobs:
             }
             $infoContent = "RDP Connection Info`n==================`nTailscale IP: $env:TAILSCALE_IP`nUsername: RDP`nPassword: $env:RDP_PASSWORD`nLast Updated: $(Get-Date)"
             Set-Content -Path "rdp-info.txt" -Value $infoContent -Encoding UTF8
+            
             git config --global user.email "action@github.com"
             git config --global user.name "GitHub Action"
             git add session-state/ rdp-info.txt
-            git commit -m "Auto-save at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
-            git push
+            git commit -m "Auto-save at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" --allow-empty
+            git pull --rebase origin main
+            git push origin main
             Write-Host "Session state saved!"
           }
           
@@ -178,9 +180,11 @@ jobs:
             New-Item -ItemType Directory -Path "session-state/Downloads" -Force | Out-Null
             Get-ChildItem -Path "$env:USERPROFILE\Downloads" -File -Recurse -ErrorAction SilentlyContinue | Copy-Item -Destination "session-state/Downloads" -Force -ErrorAction SilentlyContinue
           }
+          
           git config --global user.email "action@github.com"
           git config --global user.name "GitHub Action"
           git add session-state/ rdp-info.txt
-          git commit -m "Final save at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
-          git push
+          git commit -m "Final save at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" --allow-empty
+          git pull --rebase origin main
+          git push origin main
           Write-Host "Final save completed!"
