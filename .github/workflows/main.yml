@@ -92,7 +92,7 @@ jobs:
 
       - name: Establish Tailscale Connection
         run: |
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-persistent
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=tskey-auth-kRCjY7C8FN11CNTRL-rqojmk7sWiXPqPp4y8ZciX8uwzB4Q2Fh --hostname=gh-runner-persistent
           $tsIP = $null
           $retries = 0
           while (-not $tsIP -and $retries -lt 15) {
